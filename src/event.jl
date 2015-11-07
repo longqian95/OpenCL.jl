@@ -4,12 +4,13 @@ abstract CLEvent <: CLObject
 
 type Event <: CLEvent
     id :: CL_event
+    _callbacks :: ObjectIdDict
 
     function Event(evt_id::CL_event; retain=false)
         if retain
             @check api.clRetainEvent(evt_id)
         end
-        evt = new(evt_id)
+        evt = new(evt_id, ObjectIdDict())
         finalizer(evt, _finalize)
         return evt
     end
@@ -19,12 +20,13 @@ end
 type NannyEvent <: CLEvent
     id::CL_event
     obj::Any
+    _callbacks :: ObjectIdDict
 
     function NannyEvent(evt_id::CL_event, obj::Any; retain=false)
         if retain
             @check api.clRetainEvent(evt_id)
         end
-        nanny_evt = new(evt_id, obj)
+        nanny_evt = new(evt_id, obj, ObjectIdDict())
         finalizer(nanny_evt, x -> begin
             wait(x)
             x.obj = nothing
@@ -107,6 +109,10 @@ function event_notify(evt_id::CL_event, status::CL_int, payload::Ptr{Ptr{Void}})
     nothing
 end
 
+function preserve_callback(evt :: CLEvent, cb_arr)
+    evt._callbacks[cb_arr] = 0
+end
+
 
 function add_callback(evt::CLEvent, callback::Function)
     event_notify_ptr = cfunction(event_notify, Void,
@@ -116,6 +122,7 @@ function add_callback(evt::CLEvent, callback::Function)
     status = Ref{CL_int}(0)
     cb = Base.SingleAsyncWork(data -> callback(evt_id[], status[]))
     ptrs = [cb.handle, Base.unsafe_convert(Ptr, evt_id), Base.unsafe_convert(Ptr, status)]
+    preserve_callback(evt, ptrs)
 
     @check api.clSetEventCallback(evt.id, CL_COMPLETE, event_notify_ptr, ptrs)
 end
