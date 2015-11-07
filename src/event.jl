@@ -116,7 +116,7 @@ end
 
 function add_callback(evt::CLEvent, callback::Function)
     event_notify_ptr = cfunction(event_notify, Void,
-                                   (CL_event, CL_int, Ptr{Void}))
+                                   (CL_event, CL_int, Ptr{Ptr{Void}}))
 
     evt_id = Ref{CL_event}(0)
     status = Ref{CL_int}(0)
