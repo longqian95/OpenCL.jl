@@ -4,13 +4,14 @@ abstract CLEvent <: CLObject
 
 type Event <: CLEvent
     id :: CL_event
-    _callbacks :: ObjectIdDict
+    _cbs :: ObjectIdDict
+    _memory :: Vector{Ptr{Void}}
 
     function Event(evt_id::CL_event; retain=false)
         if retain
             @check api.clRetainEvent(evt_id)
         end
-        evt = new(evt_id, ObjectIdDict())
+        evt = new(evt_id, ObjectIdDict(), Ptr{Void}[])
         finalizer(evt, _finalize)
         return evt
     end
@@ -20,13 +21,14 @@ end
 type NannyEvent <: CLEvent
     id::CL_event
     obj::Any
-    _callbacks :: ObjectIdDict
+    _cbs :: ObjectIdDict
+    _memory :: Vector{Ptr{Void}}
 
     function NannyEvent(evt_id::CL_event, obj::Any; retain=false)
         if retain
             @check api.clRetainEvent(evt_id)
         end
-        nanny_evt = new(evt_id, obj, ObjectIdDict())
+        nanny_evt = new(evt_id, obj, ObjectIdDict(), Ptr{Void}[])
         finalizer(nanny_evt, x -> begin
             wait(x)
             x.obj = nothing
@@ -37,6 +39,9 @@ type NannyEvent <: CLEvent
 end
 
 function _finalize(evt::CLEvent)
+    for p in evt._memory
+	Libc.free(p)
+    end
     if evt.id != C_NULL
         @check api.clReleaseEvent(evt.id)
         evt.id = C_NULL
@@ -96,10 +101,11 @@ Base.getindex(evt::CLEvent, evt_info::Symbol) = info(evt, evt_info)
     end
 end
 
-function event_notify(evt_id::CL_event, status::CL_int, payload::Ptr{Ptr{Void}})
-    handle = unsafe_load(payload, 1)
-    ptr_evt_id = convert(Ptr{CL_event}, unsafe_load(payload, 2))
-    ptr_status = convert(Ptr{CL_int}, unsafe_load(payload, 3))
+function event_notify(evt_id::CL_event, status::CL_int, payload::Ptr{Void})
+    ptrs = convert(Ptr{Ptr{Void}}, payload)
+    handle = unsafe_load(ptrs, 1)
+    ptr_evt_id = convert(Ptr{CL_event}, unsafe_load(ptrs, 2))
+    ptr_status = convert(Ptr{CL_int}, unsafe_load(ptrs, 3))
 
     unsafe_store!(ptr_evt_id, evt_id, 1)
     unsafe_store!(ptr_status, status, 1)
@@ -109,22 +115,35 @@ function event_notify(evt_id::CL_event, status::CL_int, payload::Ptr{Ptr{Void}})
     nothing
 end
 
-function preserve_callback(evt :: CLEvent, cb_arr)
-    evt._callbacks[cb_arr] = 0
+function preserve_callback(evt :: CLEvent, cb, ptr)
+    evt._cbs[cb] = 0
+    push!(evt._memory, ptr)
 end
 
 
 function add_callback(evt::CLEvent, callback::Function)
     event_notify_ptr = cfunction(event_notify, Void,
-                                   (CL_event, CL_int, Ptr{Ptr{Void}}))
+                                   (CL_event, CL_int, Ptr{Void}))
 
-    evt_id = Ref{CL_event}(0)
-    status = Ref{CL_int}(0)
-    cb = Base.SingleAsyncWork(data -> callback(evt_id[], status[]))
-    ptrs = [cb.handle, Base.unsafe_convert(Ptr, evt_id), Base.unsafe_convert(Ptr, status)]
-    preserve_callback(evt, ptrs)
+    r_evt_id = Ref{CL_event}(0)
+    p_evt_id = Base.unsafe_convert(Ptr{CL_event}, r_evt_id)
+    r_status = Ref{CL_int}(0)
+    p_status = Base.unsafe_convert(Ptr{CL_int}, r_status)
 
-    @check api.clSetEventCallback(evt.id, CL_COMPLETE, event_notify_ptr, ptrs)
+    cb = Base.SingleAsyncWork(data -> begin
+		println("Received callback")
+		callback(r_evt_id[], r_status[])
+	end)
+    mem = Libc.malloc(3 * sizeof(Ptr{Void}))
+
+    ptrs = convert(Ptr{Ptr{Void}}, mem)
+    unsafe_store!(ptrs, cb.handle, 1)
+    unsafe_store!(ptrs, p_evt_id, 2)
+    unsafe_store!(ptrs, p_status, 3)
+
+    preserve_callback(evt, cb, mem)
+
+    @check api.clSetEventCallback(evt.id, CL_COMPLETE, event_notify_ptr, mem)
 end
 
 function wait(evt::CLEvent)
